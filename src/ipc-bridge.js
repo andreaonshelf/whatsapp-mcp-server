@@ -105,6 +105,102 @@ export function startRequestProcessor(whatsappClient) {
                 }));
               break;
               
+            case 'getMessages':
+              const chat = await whatsappClient.getChatById(request.params.chatId);
+              const messages = await chat.fetchMessages({ limit: request.params.limit || 20 });
+              result = messages.map(msg => ({
+                id: msg.id._serialized,
+                body: msg.body,
+                from: msg.from,
+                to: msg.to,
+                timestamp: msg.timestamp,
+                isMe: msg.fromMe,
+                hasMedia: msg.hasMedia,
+                type: msg.type,
+              }));
+              break;
+              
+            case 'searchMessages':
+              const allChats = await whatsappClient.getChats();
+              const searchResults = [];
+              const query = request.params.query?.toLowerCase();
+              
+              for (const chat of allChats) {
+                if (request.params.contactId && chat.id._serialized !== request.params.contactId) {
+                  continue;
+                }
+                
+                const messages = await chat.fetchMessages({ limit: 100 });
+                const matches = messages.filter(msg => 
+                  !query || msg.body.toLowerCase().includes(query)
+                );
+                
+                searchResults.push(...matches.slice(0, request.params.limit || 10));
+                if (searchResults.length >= (request.params.limit || 10)) break;
+              }
+              
+              result = searchResults.map(msg => ({
+                id: msg.id._serialized,
+                body: msg.body,
+                from: msg.from,
+                to: msg.to,
+                timestamp: msg.timestamp,
+                chatId: msg.from,
+                chatName: msg.chat?.name || msg.from,
+              }));
+              break;
+              
+            case 'sendMessage':
+              await whatsappClient.sendMessage(request.params.to, request.params.message);
+              result = { success: true, message: 'Message sent successfully' };
+              break;
+              
+            case 'getMediaFromContact':
+              const targetChat = await whatsappClient.getChatById(request.params.contactId);
+              const mediaMessages = await targetChat.fetchMessages({ limit: 100 });
+              
+              const mediaFiles = mediaMessages
+                .filter(msg => msg.hasMedia)
+                .filter(msg => {
+                  if (request.params.mediaType === 'all') return true;
+                  if (request.params.mediaType === 'image') return msg.type === 'image';
+                  if (request.params.mediaType === 'video') return msg.type === 'video';
+                  if (request.params.mediaType === 'audio') return msg.type === 'audio';
+                  if (request.params.mediaType === 'document') return msg.type === 'document';
+                  return true;
+                })
+                .slice(0, request.params.limit || 10);
+              
+              const mediaInfo = [];
+              for (const msg of mediaFiles) {
+                try {
+                  const media = await msg.downloadMedia();
+                  mediaInfo.push({
+                    id: msg.id._serialized,
+                    type: msg.type,
+                    mimetype: media.mimetype,
+                    filename: media.filename || `media_${msg.id._serialized}`,
+                    timestamp: msg.timestamp,
+                    from: msg.from,
+                    caption: msg.body || '',
+                    size: media.data ? Buffer.from(media.data, 'base64').length : 0,
+                    data: media.data.substring(0, 100) + '...' // Truncated for response size
+                  });
+                } catch (e) {
+                  mediaInfo.push({
+                    id: msg.id._serialized,
+                    type: msg.type,
+                    timestamp: msg.timestamp,
+                    from: msg.from,
+                    caption: msg.body || '',
+                    error: 'Failed to download media: ' + e.message
+                  });
+                }
+              }
+              
+              result = mediaInfo;
+              break;
+              
             default:
               throw new Error(`Unknown operation: ${request.operation}`);
           }

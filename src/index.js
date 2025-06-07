@@ -67,13 +67,22 @@ class WhatsAppMCPServer {
     const stateFile = '/tmp/whatsapp-mcp-state.json';
     
     try {
-      // Check if lock file exists and is recent (less than 60 seconds old)
+      // Check if lock file exists and if the process is actually running
       if (fs.existsSync(lockFile)) {
         const lockData = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
         const lockAge = Date.now() - new Date(lockData.timestamp).getTime();
         
-        if (lockAge < 60000) { // Less than 60 seconds old
-          debugLog('[DEBUG] Another instance is already running: ' + lockData.instanceId);
+        // Check if the process is still running
+        let processRunning = false;
+        try {
+          process.kill(lockData.pid, 0); // Check if process exists
+          processRunning = true;
+        } catch (e) {
+          processRunning = false;
+        }
+        
+        if (lockAge < 120000 && processRunning) { // Less than 2 minutes old AND still running
+          debugLog('[DEBUG] Another instance is already running: ' + lockData.instanceId + ' (PID: ' + lockData.pid + ')');
           debugLog('[DEBUG] This instance (' + this.instanceId + ') will run in proxy mode');
           
           // Load state from the primary instance
@@ -82,6 +91,12 @@ class WhatsAppMCPServer {
             this.isReady = state.isReady;
             this.primaryInstanceId = lockData.instanceId;
             this.isProxyInstance = true;
+          }
+        } else {
+          debugLog('[DEBUG] Stale lock file found (age: ' + Math.round(lockAge/1000) + 's, running: ' + processRunning + '), removing...');
+          fs.unlinkSync(lockFile);
+          if (fs.existsSync(stateFile)) {
+            fs.unlinkSync(stateFile);
           }
         }
       }
@@ -129,19 +144,26 @@ class WhatsAppMCPServer {
 
     this.security = new SecurityManager();
     
+    // Setup handlers first
+    this.setupHandlers();
+    
     // Only setup WhatsApp client if we're not a proxy instance
     if (!this.isProxyInstance) {
+      debugLog('[DEBUG] Primary instance - initializing WhatsApp client');
       this.setupWhatsAppClient();
     } else {
       debugLog('[DEBUG] Proxy instance - not initializing WhatsApp client');
       // For proxy instances, create a mock client to pass the existence check
       this.whatsappClient = { isProxy: true };
     }
-    
-    this.setupHandlers();
   }
 
   async setupWhatsAppClient() {
+    if (this.isProxyInstance) {
+      debugLog('[DEBUG] Proxy instance - skipping WhatsApp client setup');
+      return;
+    }
+    
     const authDir = path.join(process.env.HOME || process.env.USERPROFILE, '.whatsapp-mcp-auth');
     
     debugLog('[DEBUG] Setting up WhatsApp client with auth dir: ' + authDir);
@@ -888,6 +910,26 @@ class WhatsAppMCPServer {
   async getMessages(chatId, limit = 10) {
     try {
       this.security.checkRateLimit('get_messages');
+      
+      // Handle proxy instance
+      if (this.isProxyInstance) {
+        debugLog('[DEBUG] Proxy instance - sending IPC request for messages');
+        try {
+          const messages = await sendRequest('getMessages', { chatId, limit });
+          debugLog('[DEBUG] Received IPC response with ' + messages.length + ' messages');
+          
+          return {
+            content: [{
+              type: 'text',
+              text: `Retrieved ${messages.length} messages from chat ${chatId}:\n${JSON.stringify(messages, null, 2)}`,
+            }],
+          };
+        } catch (error) {
+          debugLog('[DEBUG] IPC request failed: ' + error.message);
+          throw new Error(`Failed to communicate with primary WhatsApp instance: ${error.message}`);
+        }
+      }
+      
       this.security.validateContact(chatId);
       const chat = await this.whatsappClient.getChatById(chatId);
       this.security.logSecurityEvent('MESSAGES_ACCESSED', { chatId, limit });
@@ -1006,6 +1048,32 @@ class WhatsAppMCPServer {
   async searchMessages(query, contactId, dateFrom, dateTo, limit = 50, mediaType) {
     try {
       this.security.checkRateLimit('search_messages');
+      
+      // Handle proxy instance
+      if (this.isProxyInstance) {
+        debugLog('[DEBUG] Proxy instance - sending IPC request for message search');
+        try {
+          const results = await sendRequest('searchMessages', { 
+            query, 
+            contactId, 
+            dateFrom, 
+            dateTo, 
+            limit, 
+            mediaType 
+          });
+          debugLog('[DEBUG] Received IPC response with ' + results.length + ' search results');
+          
+          return {
+            content: [{
+              type: 'text',
+              text: `Found ${results.length} messages:\n${JSON.stringify(results, null, 2)}`,
+            }],
+          };
+        } catch (error) {
+          debugLog('[DEBUG] IPC request failed: ' + error.message);
+          throw new Error(`Failed to communicate with primary WhatsApp instance: ${error.message}`);
+        }
+      }
       
       const chats = await this.whatsappClient.getChats();
       let allMessages = [];
@@ -1209,6 +1277,29 @@ class WhatsAppMCPServer {
   async getMediaFromContact(contactId, mediaType = 'all', limit = 100, downloadPath) {
     try {
       this.security.checkRateLimit('get_media_from_contact');
+      
+      // Handle proxy instance
+      if (this.isProxyInstance) {
+        debugLog('[DEBUG] Proxy instance - sending IPC request for media from contact');
+        try {
+          const mediaFiles = await sendRequest('getMediaFromContact', { 
+            contactId, 
+            mediaType, 
+            limit 
+          });
+          debugLog('[DEBUG] Received IPC response with ' + mediaFiles.length + ' media files');
+          
+          return {
+            content: [{
+              type: 'text',
+              text: `Found ${mediaFiles.length} media files from ${contactId}:\n${JSON.stringify(mediaFiles, null, 2)}`,
+            }],
+          };
+        } catch (error) {
+          debugLog('[DEBUG] IPC request failed: ' + error.message);
+          throw new Error(`Failed to communicate with primary WhatsApp instance: ${error.message}`);
+        }
+      }
       
       const resolvedChatId = await this.resolveChatId(contactId);
       const chat = await this.whatsappClient.getChatById(resolvedChatId);
