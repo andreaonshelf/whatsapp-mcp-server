@@ -34,9 +34,10 @@ export async function sendRequest(operation, params) {
     timestamp: new Date().toISOString()
   }));
   
-  // Wait for response (max 30 seconds)
+  // Wait for response (max 60 seconds for media operations, 30 for others)
+  const timeout = operation === 'getMediaFromContact' ? 60000 : 30000;
   const startTime = Date.now();
-  while (Date.now() - startTime < 30000) {
+  while (Date.now() - startTime < timeout) {
     if (fs.existsSync(responseFile)) {
       const response = JSON.parse(fs.readFileSync(responseFile, 'utf8'));
       
@@ -172,19 +173,49 @@ export function startRequestProcessor(whatsappClient) {
                 .slice(0, request.params.limit || 10);
               
               const mediaInfo = [];
+              
+              // Create downloads directory
+              const downloadsDir = path.join(process.cwd(), 'downloads');
+              if (!fs.existsSync(downloadsDir)) {
+                fs.mkdirSync(downloadsDir, { recursive: true });
+              }
+              
               for (const msg of mediaFiles) {
                 try {
                   const media = await msg.downloadMedia();
+                  
+                  // Determine file extension
+                  let extension = '.bin';
+                  if (media.mimetype) {
+                    if (media.mimetype.includes('jpeg') || media.mimetype.includes('jpg')) extension = '.jpg';
+                    else if (media.mimetype.includes('png')) extension = '.png';
+                    else if (media.mimetype.includes('gif')) extension = '.gif';
+                    else if (media.mimetype.includes('mp4')) extension = '.mp4';
+                    else if (media.mimetype.includes('webp')) extension = '.webp';
+                    else if (media.mimetype.includes('pdf')) extension = '.pdf';
+                  }
+                  
+                  // Create filename with timestamp and sender info
+                  const timestamp = new Date(msg.timestamp * 1000).toISOString().replace(/[:.]/g, '-');
+                  const sender = msg.fromMe ? 'me' : 'contact';
+                  const filename = `${timestamp}_${sender}_${msg.id._serialized}${extension}`;
+                  const filepath = path.join(downloadsDir, filename);
+                  
+                  // Save the file
+                  fs.writeFileSync(filepath, media.data, 'base64');
+                  
                   mediaInfo.push({
                     id: msg.id._serialized,
                     type: msg.type,
                     mimetype: media.mimetype,
-                    filename: media.filename || `media_${msg.id._serialized}`,
+                    filename: filename,
+                    filepath: filepath,
                     timestamp: msg.timestamp,
                     from: msg.from,
+                    fromMe: msg.fromMe,
                     caption: msg.body || '',
                     size: media.data ? Buffer.from(media.data, 'base64').length : 0,
-                    data: media.data.substring(0, 100) + '...' // Truncated for response size
+                    saved: true
                   });
                 } catch (e) {
                   mediaInfo.push({
@@ -193,7 +224,8 @@ export function startRequestProcessor(whatsappClient) {
                     timestamp: msg.timestamp,
                     from: msg.from,
                     caption: msg.body || '',
-                    error: 'Failed to download media: ' + e.message
+                    error: 'Failed to download media: ' + e.message,
+                    saved: false
                   });
                 }
               }

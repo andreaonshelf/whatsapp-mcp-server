@@ -208,105 +208,12 @@ class WhatsAppMCPServer {
           startRequestProcessor(this.whatsappClient);
         }
         
-        // Inspect what's actually available in the WhatsApp page (non-blocking)
-        try {
-        debugLog('[DEBUG] Checking for pupPage...');
-        const page = this.whatsappClient.pupPage;
-        debugLog('[DEBUG] pupPage exists: ' + !!page);
-        
-        if (!page) {
-          debugLog('[DEBUG] pupPage is not available yet, setting isReady=true anyway');
-          this.isReady = true;
-          globalIsReady = true;
-          debugLog('[DEBUG] this.isReady after fallback setting: ' + this.isReady);
-          return;
-        }
-        
-        // Check what's in the window object
-        debugLog('[DEBUG] About to evaluate window keys...');
-        const windowKeys = await Promise.race([
-          page.evaluate(() => {
-            return Object.keys(window).filter(key => 
-              key.includes('Store') || 
-              key.includes('WA') || 
-              key.includes('whatsapp') ||
-              key.includes('__') ||
-              key.includes('require')
-            ).slice(0, 50);
-          }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Page evaluate timeout')), 5000))
-        ]).catch(err => {
-          debugLog('[DEBUG] Window keys evaluation failed: ' + err.message);
-          return [];
-        });
-        console.error('[DEBUG] Window keys found:', windowKeys);
-        
-        // Check if Store exists and what's in it
-        const storeInfo = await page.evaluate(() => {
-          const info = {
-            storeExists: typeof window.Store !== 'undefined',
-            wwebjsExists: typeof window.WWebJS !== 'undefined',
-          };
-          
-          if (window.Store) {
-            info.storeKeys = Object.keys(window.Store).slice(0, 20);
-          }
-          
-          if (window.WWebJS) {
-            info.wwebjsKeys = Object.keys(window.WWebJS).slice(0, 20);
-            info.wwebjsGetChats = typeof window.WWebJS.getChats;
-            info.wwebjsGetContacts = typeof window.WWebJS.getContacts;
-          }
-          
-          return info;
-        });
-        
-        console.error('[DEBUG] Store info:', JSON.stringify(storeInfo, null, 2));
-        
-        // Save debug info to file
-        fs.writeFileSync('/tmp/whatsapp-debug.json', JSON.stringify({
-          windowKeys,
-          storeInfo,
-          timestamp: new Date().toISOString()
-        }, null, 2));
-        
-      } catch (e) {
-        debugLog('[DEBUG] Failed to inspect page: ' + e.message);
-      }
+        // Skip page evaluation to prevent hanging
+        debugLog('[DEBUG] Skipping page evaluation to prevent timeouts');
       
-      // Test if WWebJS methods actually work before setting ready
-      try {
-        // Get the Puppeteer page from the WhatsApp client
-        const puppeteerPage = this.whatsappClient.pupPage;
-        if (!puppeteerPage) {
-          throw new Error('Puppeteer page not available');
-        }
-        
-        const testResult = await puppeteerPage.evaluate(() => {
-          // Test that we can access the WWebJS functions
-          if (typeof window.WWebJS !== 'object' || !window.WWebJS) {
-            throw new Error('WWebJS not available');
-          }
-          if (typeof window.WWebJS.getChats !== 'function') {
-            throw new Error('getChats not a function');
-          }
-          if (typeof window.WWebJS.getContacts !== 'function') {
-            throw new Error('getContacts not a function');
-          }
-          return 'WWebJS methods available';
-        });
-        
-        console.error('[DEBUG] WWebJS method test successful:', testResult);
-        this.isReady = true;
-        console.error('[DEBUG] this.isReady after setting:', this.isReady);
-        console.error('[DEBUG] Server is now ready to accept requests');
-      } catch (testError) {
-        console.error('[DEBUG] WWebJS method test failed:', testError.message);
-        // Set ready anyway since we know the functions exist from debug output
-        console.error('[DEBUG] Setting ready=true despite test failure (functions confirmed to exist)');
-        this.isReady = true;
-        globalIsReady = true;
-      }
+      // Skip WWebJS testing to prevent hanging - we'll test when actually needed
+      debugLog('[DEBUG] Skipping WWebJS test to prevent timeouts');
+      console.error('[DEBUG] Server is now ready to accept requests');
       } catch (error) {
         debugLog('[DEBUG] Error in ready event handler: ' + error.message);
         debugLog('[DEBUG] Stack trace: ' + error.stack);
