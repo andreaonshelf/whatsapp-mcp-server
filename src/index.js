@@ -184,9 +184,10 @@ class WhatsAppMCPServer {
 
     this.whatsappClient.on('qr', (qr) => {
       console.error('[DEBUG] QR code received - please scan with WhatsApp');
-      console.error('QR Code:', qr);
-      // QR code terminal display removed to prevent stdout interference
-      // Use the QR string above to scan manually or view in WhatsApp Web
+      // Display the actual QR code in the terminal
+      qrcode.generate(qr, { small: true }, function(qrcode) {
+        console.error(qrcode);
+      });
     });
 
     this.whatsappClient.on('ready', async () => {
@@ -208,12 +209,7 @@ class WhatsAppMCPServer {
           startRequestProcessor(this.whatsappClient);
         }
         
-        // Skip page evaluation to prevent hanging
-        debugLog('[DEBUG] Skipping page evaluation to prevent timeouts');
-      
-      // Skip WWebJS testing to prevent hanging - we'll test when actually needed
-      debugLog('[DEBUG] Skipping WWebJS test to prevent timeouts');
-      console.error('[DEBUG] Server is now ready to accept requests');
+        console.error('[DEBUG] Server is now ready to accept requests');
       } catch (error) {
         debugLog('[DEBUG] Error in ready event handler: ' + error.message);
         debugLog('[DEBUG] Stack trace: ' + error.stack);
@@ -479,6 +475,25 @@ class WhatsAppMCPServer {
             },
           },
           {
+            name: 'get_todays_media',
+            description: 'Get today\'s media files (images/videos) from a specific contact or group - attempts to download most recent media',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                contactId: {
+                  type: 'string',
+                  description: 'Contact ID or phone number',
+                },
+                mediaType: {
+                  type: 'string',
+                  enum: ['image', 'video', 'all'],
+                  description: 'Type of media to retrieve (default: image)',
+                },
+              },
+              required: ['contactId'],
+            },
+          },
+          {
             name: 'export_contact_data',
             description: 'Export all messages and data for a contact in CRM-friendly format',
             inputSchema: {
@@ -572,6 +587,9 @@ class WhatsAppMCPServer {
         case 'get_contact_activity':
           return await this.getContactActivity(args.contactId, args.days);
 
+        case 'get_todays_media':
+          return await this.getTodaysMedia(args.contactId, args.mediaType);
+
         case 'export_contact_data':
           return await this.exportContactData(args.contactId, args.format);
 
@@ -603,6 +621,25 @@ class WhatsAppMCPServer {
       this.security.checkRateLimit('send_message', to);
       this.security.validateContact(to);
       const sanitizedMessage = this.security.sanitizeMessage(message);
+      
+      // Handle proxy instance
+      if (this.isProxyInstance) {
+        debugLog('[DEBUG] Proxy instance - sending IPC request for message send');
+        try {
+          const result = await sendRequest('sendMessage', { to, message: sanitizedMessage });
+          debugLog('[DEBUG] Message sent via IPC');
+          
+          return {
+            content: [{
+              type: 'text',
+              text: `Message sent successfully to ${to}`,
+            }],
+          };
+        } catch (error) {
+          debugLog('[DEBUG] IPC request failed: ' + error.message);
+          throw new Error(`Failed to communicate with primary WhatsApp instance: ${error.message}`);
+        }
+      }
       
       const chatId = await this.resolveChatId(to);
       const sentMessage = await this.whatsappClient.sendMessage(chatId, sanitizedMessage);
@@ -1085,6 +1122,25 @@ class WhatsAppMCPServer {
     try {
       this.security.checkRateLimit('get_contact_activity');
       
+      // Handle proxy instance
+      if (this.isProxyInstance) {
+        debugLog('[DEBUG] Proxy instance - sending IPC request for contact activity');
+        try {
+          const activity = await sendRequest('getContactActivity', { contactId, days });
+          debugLog('[DEBUG] Received IPC response for contact activity');
+          
+          return {
+            content: [{
+              type: 'text',
+              text: `Contact activity summary for ${contactId}:\n${JSON.stringify(activity, null, 2)}`,
+            }],
+          };
+        } catch (error) {
+          debugLog('[DEBUG] IPC request failed: ' + error.message);
+          throw new Error(`Failed to communicate with primary WhatsApp instance: ${error.message}`);
+        }
+      }
+      
       const resolvedChatId = await this.resolveChatId(contactId);
       const chat = await this.whatsappClient.getChatById(resolvedChatId);
       
@@ -1271,6 +1327,86 @@ class WhatsAppMCPServer {
       };
     } catch (error) {
       throw new Error(`Media retrieval failed: ${error.message}`);
+    }
+  }
+
+  async getTodaysMedia(contactId, mediaType = 'image') {
+    try {
+      this.security.checkRateLimit('get_media_from_contact');
+      
+      // Handle proxy instance
+      if (this.isProxyInstance) {
+        debugLog('[DEBUG] Proxy instance - sending IPC request for today\'s media');
+        try {
+          const mediaFiles = await sendRequest('getTodaysMedia', { 
+            contactId, 
+            mediaType
+          });
+          debugLog('[DEBUG] Received IPC response with ' + mediaFiles.length + ' today\'s media files');
+          
+          return {
+            content: [{
+              type: 'text',
+              text: `Found ${mediaFiles.length} today's media files from ${contactId}:\n${JSON.stringify(mediaFiles, null, 2)}`,
+            }],
+          };
+        } catch (error) {
+          debugLog('[DEBUG] IPC request failed: ' + error.message);
+          throw new Error(`Failed to communicate with primary WhatsApp instance: ${error.message}`);
+        }
+      }
+      
+      // Direct implementation for primary instance
+      const resolvedChatId = await this.resolveChatId(contactId);
+      const chat = await this.whatsappClient.getChatById(resolvedChatId);
+      const messages = await chat.fetchMessages({ limit: 50 }); // Smaller limit for speed
+      
+      // Filter for today's media (last 24 hours)
+      const todayTimestamp = Date.now() / 1000 - 86400;
+      const todayMediaMessages = messages.filter(msg => {
+        if (!msg.hasMedia) return false;
+        if (msg.timestamp < todayTimestamp) return false;
+        
+        if (mediaType === 'all') return true;
+        return msg.type === mediaType;
+      });
+
+      const mediaData = [];
+      
+      for (const msg of todayMediaMessages) {
+        try {
+          const media = await msg.downloadMedia();
+          
+          const mediaInfo = {
+            messageId: msg.id.id,
+            timestamp: new Date(msg.timestamp * 1000).toISOString(),
+            type: msg.type,
+            mimetype: media.mimetype,
+            filename: media.filename || `today_media_${msg.id.id}`,
+            filesize: media.data ? media.data.length : 0,
+            caption: msg.body || '',
+            fromMe: msg.fromMe,
+            isToday: true,
+          };
+
+          mediaData.push(mediaInfo);
+        } catch (error) {
+          console.warn(`Failed to download today's media from message ${msg.id.id}:`, error);
+        }
+      }
+
+      this.security.logSecurityEvent('TODAYS_MEDIA_ACCESSED', { 
+        contactId, mediaType, resultCount: mediaData.length 
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Found ${mediaData.length} today's media files from ${contactId}:\n${JSON.stringify(mediaData, null, 2)}`,
+        }],
+      };
+    } catch (error) {
+      throw new Error(`Today's media retrieval failed: ${error.message}`);
     }
   }
 

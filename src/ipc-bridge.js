@@ -131,24 +131,65 @@ export function startRequestProcessor(whatsappClient) {
                   continue;
                 }
                 
-                const messages = await chat.fetchMessages({ limit: 100 });
-                const matches = messages.filter(msg => 
-                  !query || msg.body.toLowerCase().includes(query)
-                );
+                const messages = await chat.fetchMessages({ limit: 200 });
                 
-                searchResults.push(...matches.slice(0, request.params.limit || 10));
+                for (const msg of messages) {
+                  // Date filtering
+                  if (request.params.dateFrom) {
+                    const msgDate = new Date(msg.timestamp * 1000);
+                    const fromDate = new Date(request.params.dateFrom);
+                    if (msgDate < fromDate) continue;
+                  }
+                  
+                  if (request.params.dateTo) {
+                    const msgDate = new Date(msg.timestamp * 1000);
+                    const toDate = new Date(request.params.dateTo);
+                    if (msgDate > toDate) continue;
+                  }
+
+                  // Media type filtering
+                  if (request.params.mediaType) {
+                    if (request.params.mediaType === 'any' && !msg.hasMedia) {
+                      continue;
+                    } else if (request.params.mediaType !== 'any' && msg.type !== request.params.mediaType) {
+                      continue;
+                    }
+                  }
+
+                  // Content filtering (skip for media-only searches unless there's a caption)
+                  if (query && !request.params.mediaType && !msg.body.toLowerCase().includes(query)) {
+                    continue;
+                  }
+
+                  // For media searches, also check captions
+                  if (query && request.params.mediaType && msg.hasMedia) {
+                    const caption = msg.body || '';
+                    if (!caption.toLowerCase().includes(query)) {
+                      continue;
+                    }
+                  }
+
+                  searchResults.push({
+                    id: msg.id._serialized,
+                    body: msg.body,
+                    from: msg.from,
+                    to: msg.to,
+                    timestamp: msg.timestamp,
+                    chatId: chat.id._serialized,
+                    chatName: chat.name || msg.from,
+                    type: msg.type,
+                    hasMedia: msg.hasMedia,
+                  });
+                  
+                  if (searchResults.length >= (request.params.limit || 10)) break;
+                }
+                
                 if (searchResults.length >= (request.params.limit || 10)) break;
               }
               
-              result = searchResults.map(msg => ({
-                id: msg.id._serialized,
-                body: msg.body,
-                from: msg.from,
-                to: msg.to,
-                timestamp: msg.timestamp,
-                chatId: msg.from,
-                chatName: msg.chat?.name || msg.from,
-              }));
+              // Sort by timestamp (newest first)
+              searchResults.sort((a, b) => b.timestamp - a.timestamp);
+              result = searchResults.slice(0, request.params.limit || 10);
               break;
               
             case 'sendMessage':
@@ -158,9 +199,12 @@ export function startRequestProcessor(whatsappClient) {
               
             case 'getMediaFromContact':
               const targetChat = await whatsappClient.getChatById(request.params.contactId);
-              const mediaMessages = await targetChat.fetchMessages({ limit: 100 });
               
-              const mediaFiles = mediaMessages
+              // Simple approach: fetch recent messages with larger limit
+              const allMessages = await targetChat.fetchMessages({ limit: 300 });
+              console.log(`[DEBUG] Fetched ${allMessages.length} messages for media search`);
+              
+              const mediaFiles = allMessages
                 .filter(msg => msg.hasMedia)
                 .filter(msg => {
                   if (request.params.mediaType === 'all') return true;
@@ -170,7 +214,9 @@ export function startRequestProcessor(whatsappClient) {
                   if (request.params.mediaType === 'document') return msg.type === 'document';
                   return true;
                 })
-                .slice(0, request.params.limit || 10);
+                .slice(0, request.params.limit || 50); // Increased default from 10 to 50
+              
+              console.log(`[DEBUG] Processing ${mediaFiles.length} media files after filtering`);
               
               const mediaInfo = [];
               
@@ -191,8 +237,19 @@ export function startRequestProcessor(whatsappClient) {
                     else if (media.mimetype.includes('png')) extension = '.png';
                     else if (media.mimetype.includes('gif')) extension = '.gif';
                     else if (media.mimetype.includes('mp4')) extension = '.mp4';
+                    else if (media.mimetype.includes('webm')) extension = '.webm';
+                    else if (media.mimetype.includes('mov')) extension = '.mov';
+                    else if (media.mimetype.includes('avi')) extension = '.avi';
                     else if (media.mimetype.includes('webp')) extension = '.webp';
                     else if (media.mimetype.includes('pdf')) extension = '.pdf';
+                    else if (media.mimetype.includes('audio')) extension = '.ogg';
+                    else if (media.mimetype.includes('opus')) extension = '.ogg';
+                  } else {
+                    // Fallback based on message type
+                    if (msg.type === 'image') extension = '.jpg';
+                    else if (msg.type === 'video') extension = '.mp4';
+                    else if (msg.type === 'audio' || msg.type === 'ptt') extension = '.ogg';
+                    else if (msg.type === 'document') extension = '.pdf';
                   }
                   
                   // Create filename with timestamp and sender info
@@ -231,6 +288,77 @@ export function startRequestProcessor(whatsappClient) {
               }
               
               result = mediaInfo;
+              break;
+              
+            case 'getContactActivity':
+              const activityChat = await whatsappClient.getChatById(request.params.contactId);
+              const cutoffDate = new Date();
+              cutoffDate.setDate(cutoffDate.getDate() - (request.params.days || 30));
+              
+              const activityMessages = await activityChat.fetchMessages({ limit: 200 });
+              const recentActivityMessages = activityMessages.filter(msg => 
+                new Date(msg.timestamp * 1000) > cutoffDate
+              );
+
+              // Analyze activity patterns
+              const activity = {
+                contactId: request.params.contactId,
+                contactName: activityChat.name,
+                totalMessages: recentActivityMessages.length,
+                sentByContact: recentActivityMessages.filter(msg => msg.fromMe === false).length,
+                sentByMe: recentActivityMessages.filter(msg => msg.fromMe === true).length,
+                mediaMessages: recentActivityMessages.filter(msg => msg.hasMedia).length,
+                firstMessage: recentActivityMessages.length > 0 ? 
+                  new Date(Math.min(...recentActivityMessages.map(m => m.timestamp * 1000))).toISOString() : null,
+                lastMessage: recentActivityMessages.length > 0 ? 
+                  new Date(Math.max(...recentActivityMessages.map(m => m.timestamp * 1000))).toISOString() : null,
+                averageMessagesPerDay: (recentActivityMessages.length / (request.params.days || 30)).toFixed(1),
+              };
+
+              result = activity;
+              break;
+              
+            case 'getTodaysMedia':
+              // Get today's media by fetching very recent messages and listing them without downloading to avoid timeouts
+              const todayChat = await whatsappClient.getChatById(request.params.contactId);
+              
+              // Fetch only the most recent messages (smaller limit for speed)
+              const recentMessages = await todayChat.fetchMessages({ limit: 30 });
+              console.log(`[DEBUG] Fetched ${recentMessages.length} recent messages for today's media`);
+              
+              // Filter for today's media messages (last 24 hours)
+              const todayTimestamp = Date.now() / 1000 - 86400; // 24 hours ago
+              const todayMediaFiles = recentMessages
+                .filter(msg => msg.hasMedia && msg.timestamp > todayTimestamp)
+                .filter(msg => {
+                  if (request.params.mediaType === 'all') return true;
+                  if (request.params.mediaType === 'image') return msg.type === 'image';
+                  if (request.params.mediaType === 'video') return msg.type === 'video';
+                  return true;
+                });
+              
+              console.log(`[DEBUG] Found ${todayMediaFiles.length} today's media files`);
+              
+              const todayMediaInfo = [];
+              
+              // Just list the media files without downloading to avoid timeouts
+              for (const msg of todayMediaFiles) {
+                todayMediaInfo.push({
+                  id: msg.id._serialized,
+                  type: msg.type,
+                  timestamp: msg.timestamp,
+                  timestampISO: new Date(msg.timestamp * 1000).toISOString(),
+                  from: msg.from,
+                  fromMe: msg.fromMe,
+                  caption: msg.body || '',
+                  hasMedia: msg.hasMedia,
+                  messageType: msg.type,
+                  isToday: true,
+                  note: 'Media identified but not downloaded to avoid timeouts'
+                });
+              }
+              
+              result = todayMediaInfo;
               break;
               
             default:
