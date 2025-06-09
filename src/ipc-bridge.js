@@ -2,16 +2,12 @@
 import fs from 'fs';
 import path from 'path';
 
-<<<<<<< Updated upstream
-const IPC_DIR = '/tmp/whatsapp-mcp-ipc';
-=======
 // Determine if this is business instance
 const isBusinessInstance = process.env.WHATSAPP_INSTANCE === 'business' || process.argv.includes('--business');
 const instancePrefix = isBusinessInstance ? 'business-' : '';
 
 // Use more reliable paths with proper permissions
 const IPC_DIR = `/tmp/whatsapp-${instancePrefix}mcp-ipc`;
->>>>>>> Stashed changes
 const REQUEST_DIR = path.join(IPC_DIR, 'requests');
 const RESPONSE_DIR = path.join(IPC_DIR, 'responses');
 
