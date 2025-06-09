@@ -175,8 +175,20 @@ class WhatsAppMCPServer {
       }),
       puppeteer: {
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        args: [
+          '--no-sandbox', 
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--disable-gpu'
+        ],
       },
+      webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2429.7.html',
+      }
     });
     
     // Set global reference
@@ -825,9 +837,20 @@ class WhatsAppMCPServer {
       // Try to get chats with better error handling
       const chats = await this.whatsappClient.getChats();
       console.error('[DEBUG] Successfully got chats:', chats?.length || 0);
+      
+      // Debug the structure of the first chat
+      if (chats && chats.length > 0) {
+        console.error('[DEBUG] First chat structure:', JSON.stringify(Object.keys(chats[0]), null, 2));
+        console.error('[DEBUG] First chat id:', chats[0].id);
+        console.error('[DEBUG] First chat id type:', typeof chats[0].id);
+        if (chats[0].id) {
+          console.error('[DEBUG] First chat id keys:', Object.keys(chats[0].id));
+        }
+      }
+      
       this.security.logSecurityEvent('CHATS_ACCESSED', { limit });
       const chatList = chats.slice(0, limit).map(chat => ({
-        id: chat.id._serialized,
+        id: chat.id?._serialized || chat.id || 'unknown',
         name: chat.name,
         isGroup: chat.isGroup,
         unreadCount: chat.unreadCount,

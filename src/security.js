@@ -127,7 +127,7 @@ export class SecurityManager {
     };
     
     const logPath = './security.log';
-    fs.appendFileSync(logPath, JSON.stringify(logEntry) + '\n');
+    fs.appendFileSync(logPath, JSON.stringify(logEntry) + '\n', { mode: 0o644 });
   }
 
   addAllowedContact(contactId) {

@@ -2,15 +2,62 @@
 import fs from 'fs';
 import path from 'path';
 
+<<<<<<< Updated upstream
 const IPC_DIR = '/tmp/whatsapp-mcp-ipc';
+=======
+// Determine if this is business instance
+const isBusinessInstance = process.env.WHATSAPP_INSTANCE === 'business' || process.argv.includes('--business');
+const instancePrefix = isBusinessInstance ? 'business-' : '';
+
+// Use more reliable paths with proper permissions
+const IPC_DIR = `/tmp/whatsapp-${instancePrefix}mcp-ipc`;
+>>>>>>> Stashed changes
 const REQUEST_DIR = path.join(IPC_DIR, 'requests');
 const RESPONSE_DIR = path.join(IPC_DIR, 'responses');
 
-// Ensure directories exist
+// Debug logger that writes to file
+const debugLog = (message) => {
+  const timestamp = new Date().toISOString();
+  const logMessage = `[${timestamp}] [IPC] ${message}\n`;
+  fs.appendFileSync('/tmp/whatsapp-mcp-ipc-debug.log', logMessage);
+  console.error(`[IPC] ${message}`);
+};
+
+// Ensure directories exist with proper permissions
 function ensureDirectories() {
-  if (!fs.existsSync(IPC_DIR)) fs.mkdirSync(IPC_DIR);
-  if (!fs.existsSync(REQUEST_DIR)) fs.mkdirSync(REQUEST_DIR);
-  if (!fs.existsSync(RESPONSE_DIR)) fs.mkdirSync(RESPONSE_DIR);
+  try {
+    if (!fs.existsSync(IPC_DIR)) {
+      fs.mkdirSync(IPC_DIR, { mode: 0o755 });
+      debugLog(`Created IPC directory: ${IPC_DIR}`);
+    }
+    
+    if (!fs.existsSync(REQUEST_DIR)) {
+      fs.mkdirSync(REQUEST_DIR, { mode: 0o755 });
+      debugLog(`Created requests directory: ${REQUEST_DIR}`);
+    }
+    
+    if (!fs.existsSync(RESPONSE_DIR)) {
+      fs.mkdirSync(RESPONSE_DIR, { mode: 0o755 });
+      debugLog(`Created responses directory: ${RESPONSE_DIR}`);
+    }
+    
+    // Ensure directories are writable
+    fs.accessSync(REQUEST_DIR, fs.constants.W_OK);
+    fs.accessSync(RESPONSE_DIR, fs.constants.W_OK);
+    
+    debugLog('IPC directories verified with write permissions');
+  } catch (error) {
+    debugLog(`Error ensuring directories: ${error.message}`);
+    // Try to create with default permissions as fallback
+    try {
+      if (!fs.existsSync(IPC_DIR)) fs.mkdirSync(IPC_DIR);
+      if (!fs.existsSync(REQUEST_DIR)) fs.mkdirSync(REQUEST_DIR);
+      if (!fs.existsSync(RESPONSE_DIR)) fs.mkdirSync(RESPONSE_DIR);
+      debugLog('Created directories with default permissions as fallback');
+    } catch (fallbackError) {
+      debugLog(`Critical error creating directories: ${fallbackError.message}`);
+    }
+  }
 }
 
 // Generate unique request ID
@@ -18,67 +65,173 @@ function generateRequestId() {
   return Date.now() + '-' + Math.random().toString(36).substring(7);
 }
 
-// Send request from proxy to primary
+// Send request from proxy to primary with improved error handling
 export async function sendRequest(operation, params) {
-  ensureDirectories();
-  
-  const requestId = generateRequestId();
-  const requestFile = path.join(REQUEST_DIR, `${requestId}.json`);
-  const responseFile = path.join(RESPONSE_DIR, `${requestId}.json`);
-  
-  // Write request
-  fs.writeFileSync(requestFile, JSON.stringify({
-    id: requestId,
-    operation,
-    params,
-    timestamp: new Date().toISOString()
-  }));
-  
-  // Wait for response (max 60 seconds for media operations, 30 for others)
-  const timeout = operation === 'getMediaFromContact' ? 60000 : 30000;
-  const startTime = Date.now();
-  while (Date.now() - startTime < timeout) {
-    if (fs.existsSync(responseFile)) {
-      const response = JSON.parse(fs.readFileSync(responseFile, 'utf8'));
-      
-      // Clean up files
-      fs.unlinkSync(requestFile);
-      fs.unlinkSync(responseFile);
-      
-      if (response.error) {
-        throw new Error(response.error);
-      }
-      
-      return response.result;
+  try {
+    ensureDirectories();
+    
+    const requestId = generateRequestId();
+    const requestFile = path.join(REQUEST_DIR, `${requestId}.json`);
+    const responseFile = path.join(RESPONSE_DIR, `${requestId}.json`);
+    
+    debugLog(`Sending request ${requestId} for operation: ${operation}`);
+    
+      // Write request with error handling
+      try {
+        fs.writeFileSync(requestFile, JSON.stringify({
+          id: requestId,
+          operation,
+          params,
+          timestamp: new Date().toISOString()
+        }), { mode: 0o644 });
+    } catch (writeError) {
+      debugLog(`Error writing request file: ${writeError.message}`);
+      throw new Error(`Failed to write request: ${writeError.message}`);
     }
     
-    // Wait 100ms before checking again
-    await new Promise(resolve => setTimeout(resolve, 100));
+    // Wait for response (max 60 seconds for media operations, 30 for others)
+    const timeout = operation === 'getMediaFromContact' ? 60000 : 30000;
+    const startTime = Date.now();
+    
+    debugLog(`Waiting for response to ${requestId} (timeout: ${timeout}ms)`);
+    
+    while (Date.now() - startTime < timeout) {
+      try {
+        if (fs.existsSync(responseFile)) {
+          // Read response with error handling
+          let response;
+          try {
+            const responseData = fs.readFileSync(responseFile, 'utf8');
+            response = JSON.parse(responseData);
+          } catch (readError) {
+            debugLog(`Error reading response file: ${readError.message}`);
+            throw new Error(`Failed to read response: ${readError.message}`);
+          }
+          
+          debugLog(`Received response for ${requestId}`);
+          
+          // Clean up files
+          try {
+            if (fs.existsSync(requestFile)) fs.unlinkSync(requestFile);
+            if (fs.existsSync(responseFile)) fs.unlinkSync(responseFile);
+          } catch (cleanupError) {
+            debugLog(`Warning: Failed to clean up request/response files: ${cleanupError.message}`);
+          }
+          
+          if (response.error) {
+            debugLog(`Request ${requestId} returned error: ${response.error}`);
+            throw new Error(response.error);
+          }
+          
+          return response.result;
+        }
+      } catch (checkError) {
+        if (checkError.code !== 'ENOENT') {
+          debugLog(`Error checking response file: ${checkError.message}`);
+        }
+      }
+      
+      // Wait 100ms before checking again
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    // Timeout - clean up request file
+    debugLog(`Request ${requestId} timed out after ${timeout}ms`);
+    try {
+      if (fs.existsSync(requestFile)) {
+        fs.unlinkSync(requestFile);
+      }
+    } catch (cleanupError) {
+      debugLog(`Warning: Failed to clean up request file after timeout: ${cleanupError.message}`);
+    }
+    
+    throw new Error('Request timeout - primary instance may not be running');
+  } catch (error) {
+    debugLog(`Request failed: ${error.message}`);
+    throw error;
   }
-  
-  // Timeout - clean up request file
-  if (fs.existsSync(requestFile)) {
-    fs.unlinkSync(requestFile);
-  }
-  
-  throw new Error('Request timeout - primary instance may not be running');
 }
 
-// Process requests in primary instance
+// Process requests in primary instance with improved reliability
 export function startRequestProcessor(whatsappClient) {
   ensureDirectories();
   
-  setInterval(async () => {
+  debugLog('Starting IPC request processor');
+  
+  // Process existing requests first
+  processExistingRequests();
+  
+  // Set up interval to process new requests
+  const processorInterval = setInterval(async () => {
     try {
-      const files = fs.readdirSync(REQUEST_DIR).filter(f => f.endsWith('.json'));
+      await processRequests(whatsappClient);
+    } catch (error) {
+      debugLog(`Error in request processor: ${error.message}`);
+    }
+  }, 500); // Check every 500ms
+  
+  // Return the interval so it can be cleared if needed
+  return processorInterval;
+}
+
+// Process any existing requests that might have been left from a previous run
+async function processExistingRequests() {
+  try {
+    const files = fs.readdirSync(REQUEST_DIR).filter(f => f.endsWith('.json'));
+    if (files.length > 0) {
+      debugLog(`Found ${files.length} existing requests from previous run`);
       
+      // For existing requests, just respond with an error
       for (const file of files) {
-        const requestFile = path.join(REQUEST_DIR, file);
-        const request = JSON.parse(fs.readFileSync(requestFile, 'utf8'));
-        const responseFile = path.join(RESPONSE_DIR, `${request.id}.json`);
-        
         try {
-          let result;
+          const requestFile = path.join(REQUEST_DIR, file);
+          const request = JSON.parse(fs.readFileSync(requestFile, 'utf8'));
+          const responseFile = path.join(RESPONSE_DIR, `${request.id}.json`);
+          
+          // Write error response
+          fs.writeFileSync(responseFile, JSON.stringify({
+            id: request.id,
+            error: 'Server was restarted while processing request',
+            timestamp: new Date().toISOString()
+          }), { mode: 0o644 });
+          
+          // Clean up request file
+          fs.unlinkSync(requestFile);
+          
+          debugLog(`Responded to existing request ${request.id} with restart error`);
+        } catch (error) {
+          debugLog(`Error handling existing request ${file}: ${error.message}`);
+        }
+      }
+    }
+  } catch (error) {
+    debugLog(`Error processing existing requests: ${error.message}`);
+  }
+}
+
+// Process new incoming requests
+async function processRequests(whatsappClient) {
+  try {
+    const files = fs.readdirSync(REQUEST_DIR).filter(f => f.endsWith('.json'));
+    
+    for (const file of files) {
+      let request;
+      const requestFile = path.join(REQUEST_DIR, file);
+      
+      // Read request with error handling
+      try {
+        const requestData = fs.readFileSync(requestFile, 'utf8');
+        request = JSON.parse(requestData);
+      } catch (readError) {
+        debugLog(`Error reading request file ${file}: ${readError.message}`);
+        continue; // Skip this file and try the next one
+      }
+      
+      const responseFile = path.join(RESPONSE_DIR, `${request.id}.json`);
+      debugLog(`Processing request ${request.id} for operation: ${request.operation}`);
+      
+      try {
+        let result;
           
           switch (request.operation) {
             case 'getChats':
@@ -370,7 +523,7 @@ export function startRequestProcessor(whatsappClient) {
             id: request.id,
             result,
             timestamp: new Date().toISOString()
-          }));
+          }), { mode: 0o644 });
           
         } catch (error) {
           // Write error response
@@ -378,11 +531,10 @@ export function startRequestProcessor(whatsappClient) {
             id: request.id,
             error: error.message,
             timestamp: new Date().toISOString()
-          }));
+          }), { mode: 0o644 });
         }
       }
     } catch (error) {
       console.error('[DEBUG] Request processor error:', error);
     }
-  }, 500); // Check every 500ms
 }
